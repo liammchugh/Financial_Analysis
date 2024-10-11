@@ -45,7 +45,7 @@ def efficient_frontier(expected_returns, cov_matrix, num_portfolios=10000):
 
 # Example usage with NYSE tickers
 if __name__ == "__main__":
-    tickers = ['AAPL', 'MSFT', 'GOOGL', 'FICO', 'GE', 'AVGO']  # Stock tickers
+    tickers = ['SOXX', 'IYW', 'AAPL', 'MSFT', 'GOOGL', 'FICO', 'GE', 'AVGO']  # Stock tickers
     predictions = {}
     expected_returns = []
     garch_variances = []
