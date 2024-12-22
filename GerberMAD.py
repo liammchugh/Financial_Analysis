@@ -59,8 +59,14 @@ def nested_clustering(cov_matrix, num_clusters=5):
     clusters = fcluster(linkage_matrix, num_clusters, criterion='maxclust')
     
     return clusters
+
 # CVaR Optimization with Nested Clustering Constraints
 def cvar_optimizer(returns, clusters, target_return, lambda_cvar=0.95, beta=0.05):
+    '''
+    Equity portolio management
+    Conditional Value-at-Risk constrained optimization
+    Using denoised gerber mean-absolute-deviation covariance
+    '''
     n_assets = returns.shape[1]
 
     # Calculate cluster-wise covariance matrices
@@ -119,6 +125,11 @@ def download_weekly_returns(tickers, start, end):
 
 
 def simulate_portfolio(tickers, start, end, clusters, initial_value=100000, rebalance_interval=2):
+    '''
+    Portfolio Optimization Simulation
+    Uses CVaR optimizer every n weeks
+    '''
+    
     returns, prices = download_weekly_returns(tickers, start, end)
     
     # Initialize portfolio value
@@ -130,11 +141,10 @@ def simulate_portfolio(tickers, start, end, clusters, initial_value=100000, reba
     n_assets = len(tickers)
     weights = np.ones(n_assets) / n_assets  # Equal allocation to start
     
-    # Simulate over each two-week period
+    # Simulate over each period
     for i in range(0, len(returns), rebalance_interval):
-        # Get returns for the next two weeks
-        two_week_returns = returns.iloc[i:i + rebalance_interval]
-        print(two_week_returns.head())
+        period_returns = returns.iloc[i:i + rebalance_interval]
+        print(period_returns.head())
         print(weights)
         
         # Check if weights is not None before calculating portfolio return
@@ -143,26 +153,23 @@ def simulate_portfolio(tickers, start, end, clusters, initial_value=100000, reba
             weights = np.ones(n_assets) / n_assets  # Reset to equal allocation if weights are None
         
         # Calculate portfolio return over this period
-        portfolio_return = np.dot(two_week_returns.mean().values, weights)
+        portfolio_return = np.dot(period_returns.mean().values, weights)
         portfolio_value = portfolio_value * (1 + portfolio_return)
         
         # Append the portfolio value and the corresponding timestamp
         portfolio_values.append(portfolio_value)
         timestamps.append(returns.index[i])
         
-        # Re-optimize every two weeks
+        # Re-optimize every interval [weeks]
         if i + rebalance_interval < len(returns):
-            weights = cvar_optimizer(two_week_returns, clusters, target_return=0.005)
+            weights = cvar_optimizer(period_returns, clusters, target_return=0.005)
     
-    return portfolio_values, timestamps
-
-# Visualization function
-def visualize_portfolio(tickers, start, end, initial_value=100000):
-    portfolio_values, timestamps = simulate_portfolio(tickers, start, end, clusters)
-    
-    # Convert to pandas series for easier plotting
     portfolio_series = pd.Series(portfolio_values, index=timestamps)
-    
+
+    return portfolio_series
+
+def visualize_portfolio(tickers, start, end, clusters, initial_value):
+
     # Plot the portfolio value over time
     plt.figure(figsize=(10, 6))
     portfolio_series.plot(label="Portfolio Value")
@@ -170,9 +177,12 @@ def visualize_portfolio(tickers, start, end, initial_value=100000):
     # Optional: Download benchmark (S&P 500) for comparison
     sp500 = yf.download('^GSPC', start=start, end=end)['Adj Close'].resample('W').last()
     sp500_returns = sp500.pct_change().dropna()
-
-    # Ensure matching shapes for sp500_returns
+    
+    # Align the benchmark returns with the portfolio timestamps
+    sp500_returns.index = sp500_returns.index.tz_localize(None)
+    
     sp500_value = initial_value * (1 + sp500_returns).cumprod()
+    print(sp500_value)
     
     sp500_value.plot(label="S&P 500")
     
@@ -186,14 +196,16 @@ def visualize_portfolio(tickers, start, end, initial_value=100000):
 
 
 if __name__ == "__main__":
-    
-    tickers = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'META']
+    tickers = ['IYW', 'SOXX', 'AAPL', 'MSFT', 'GOOGL', 'AVGO']
     start = '2023-01-01'
-    end = '2024-01-01'
+    end = '2024-06-01'
+    initial_value = 10000
+    interval_weeks = 1
     
     returns = download_weekly_returns(tickers, start, end)[0]
     cov_matrix = gerber_covariance(returns)
     clusters = nested_clustering(cov_matrix)
     
-    # Visualize the portfolio
-    visualize_portfolio(tickers, start, end, clusters)
+    portfolio_series = simulate_portfolio(tickers, start, end, clusters, initial_value, interval_weeks)
+    visualize_portfolio(tickers, start, end, clusters, initial_value)
+
