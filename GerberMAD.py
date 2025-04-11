@@ -25,6 +25,7 @@ import cvxpy as cp
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.linalg import eigh
 from sklearn.covariance import LedoitWolf
+from tqdm import tqdm
 from utils.download import download_returns
 from utils.visualization import visualize_portfolio
 
@@ -121,6 +122,7 @@ def cvar_optimize(exp_returns, hist_returns, clusters, target_return, hyper_args
     # Use CVXPY's @ operator for matrix multiplication
     portfolio_return = exp_returns.mean().values.flatten() @ weights
 
+    # Portfolio risk (variance)
     portfolio_risk = cp.quad_form(weights, cov_matrix_denoised)
 
     # CVaR constraints
@@ -194,17 +196,19 @@ def simulate_portfolio(tickers, returns, prices, tgt_return, initial_value=1e6, 
     # Simulate over each period
     rel_interval = int(rebalance_interval / (returns.index[1] - returns.index[0]).days)  # returns interval datapoints
     rel_hist = int(rebalance_hist / (returns.index[1] - returns.index[0]).days)  # historic interval in returns datapoints
-    for i in range(rel_interval, len(returns), rel_interval):
+    noise = np.random.normal(0, returns.std().mean(), returns.shape)  # Gaussian noise with mean 0 and returns std
+
+    for i in tqdm(range(rel_hist, len(returns), rel_interval), desc="Simulating Portfolio"):
         hist_returns = returns.iloc[i - rel_hist:i]
         period_returns = returns.iloc[i - rel_interval:i]
 
-
+        # predicted returns, simulated with noisy next per returns
         exp_returns = returns.iloc[i:i+rel_interval]
-        noise = np.random.normal(0, hist_returns.std().mean(), exp_returns.shape)  # Add Gaussian noise with mean 0 and std of historical returns
-        exp_returns = exp_returns + noise
-        
-        # Clean exp_returns to remove NaN or Inf values
+        exp_returns = exp_returns + noise[i:i+rel_interval]  # Add noise to the expected returns
+        if exp_returns.isnull().values.any():
+            print("NaN values detected in expected returns.")
         exp_returns = exp_returns.replace([np.nan, np.inf, -np.inf], 0)
+
 
         # print(period_returns.head())
         
@@ -236,15 +240,14 @@ def simulate_portfolio(tickers, returns, prices, tgt_return, initial_value=1e6, 
                     if i > 25:
                         print("Warning: Optimization failed multiple times. Setting equal weights.")
                         weights = np.ones(n_assets) / n_assets  # Reset to equal allocation
-                print(f"Adjusted annualized return after {i} iterations: {adj_tgt*(rebalance_interval * 52):.3f}")
-            weights_r = np.round(weights, 4)
-            print(f"weights: {weights_r}")
-            weight_history.append(weights_r)
+                print(f"Adjusted annualized return after {i} iterations: {adj_tgt*(rebalance_interval * 52):.4f}")
+            # print(f"weights: {weights_r}")
+            weight_history.append(weights)
 
     
     portfolio_series = pd.Series(portfolio_values, index=timestamps)
     # return portfolio_series, weight_history, final weights
-    return portfolio_series, weight_history, timestamps, weights_r
+    return portfolio_series, weight_history, timestamps, weights
 
 
 
@@ -253,20 +256,21 @@ if __name__ == "__main__":
         'IYW', 'SOXX', 'AAPL', 'MSFT', 'GOOGL', 
         'AVGO', 'NVDA', 'AMAT', 'INTC', 'TXN', 'QCOM', 
         'TLT', 'SH']  # Treasury Bonds, S&P500 Hedge
-    start = '2024-01-01'
+    start = '2022-01-01'
     end = '2025-04-09'
     initial_value = 1e4
-    rebalance_interval = 3 # days
-    rebalance_history = 20 # days
+    rebalance_interval = 2 # days
+    rebalance_history = 25 # days
     data_freq = 'D'  # Daily data frequency
-    tgt_return = 0.25 # Target return, annual
+    tgt_return = 0.20 # Target return, annual
     hyper_args = {
-        'risk_aversion': 0.95,
-        'beta': 0.05,
-        'lambda_cvar': 0.95
+        'tgt_return': tgt_return,
+        'risk_aversion': 0.9,
+        'beta': 0.15,
+        'lambda_cvar': 0.35
     }
 
-    tgt_return = tgt_return / (rebalance_interval * 356) # Convert to rebalance period return
+    tgt_return = tgt_return / 356 * rebalance_interval # Convert to rebalance period return
 
     returns, prices = download_returns(tickers, start, end, frequency=data_freq)
     if returns is None or prices is None:
@@ -312,7 +316,8 @@ if __name__ == "__main__":
     else:
         print("No weight history available to create DataFrame.")
 
-    print(f"Final weights: {final_weight}")
+    rounded_final_weight = np.round(final_weight, 4)
+    print(f"Final weights (rounded): {rounded_final_weight}")
     print(f"Tickers: {tickers}")
     
     visualize_portfolio(tickers, portfolio_series, weight_hist_df, start, end, clusters, initial_value, per=rebalance_interval)
