@@ -1,5 +1,77 @@
-import matplotlib.pyplot as plt
+
 import pandas as pd
+import matplotlib.pyplot as plt
+import yfinance as yf
+import numpy as np
+from utils.download import download_returns
+
+def visualize_portfolio(tickers, series, weight_hist, start, end, clusters, initial_value, per=2, SP500ref=True):
+    """
+        Visualize the portfolio value over time.
+
+        Args:
+            tickers (list): List of stock tickers.
+            series (pd.Series): Series containing portfolio values over time.
+            weight_hist (pd.DataFrame): DataFrame containing weights for each ticker over time.
+            start (str): Start date for the data.
+            end (str): End date for the data.
+            clusters: Self-learned clusters of assets.
+            initial_value (float): Initial value of the portfolio.
+            per (int): Rebalance period in days.
+        """
+
+    # Optional: Download benchmark (S&P 500) for comparison
+    try:
+        sp500_raw = yf.download(
+        '^GSPC',
+        start=start,
+        end=end,
+        interval="1wk",
+        auto_adjust=True,
+        actions=False
+        )
+        if not sp500_raw.empty:
+            sp500 = sp500_raw[['Close']].rename(columns={'Close': '^GSPC'})
+    except Exception as e:
+        print(f"Error downloading S&P 500 data: {e}")  
+    sp500_returns = sp500.pct_change().dropna()
+    # Align the benchmark returns with the portfolio timestamps
+    sp500_returns.index = sp500_returns.index.tz_localize(None)
+    sp500_value = initial_value * (1 + sp500_returns).cumprod()
+    # Plot the portfolio value and S&P 500 value on the first figure
+    plt.figure(figsize=(10, 6))
+    ax1 = plt.gca()
+    ax1.plot(series.index, series, label="Portfolio Value", linestyle='-', alpha=0.7)
+    if SP500ref:
+        ax1.plot(sp500_value.index, sp500_value, label="S&P 500 Value", linestyle='--', alpha=0.7)
+    ax1.set_ylabel('Portfolio & S&P 500 Value')
+    ax1.legend(loc='upper left')
+    plt.title(f'Portfolio Value Over Time: Rebalancing per {per} Days')
+    # Calculate and display average annual return
+    total_years = (series.index[-1] - series.index[0]).days / 365.25
+    avg_annual_return = ((series.iloc[-1] / initial_value) ** (1 / total_years) - 1) * 100  
+    ax1.text(0.5, 0.95, f"Total Return: {avg_annual_return:.2f}%", transform=ax1.transAxes, fontsize=10, verticalalignment='top', horizontalalignment='center', bbox=dict(boxstyle="round", facecolor="white", alpha=0.5))  
+    plt.xlabel('Date')
+    plt.ylabel('Portfolio Value')
+    plt.grid(True)
+    plt.show()
+
+    # Plot weight history on the second figure
+    # Number of weeks to show in the weight history plot
+    hist_N = 30  # Number of days to show in the weight history plot
+    weight_context_len = int(hist_N  / per)  # Show the last N weeks of weights
+    weight_hist_trimmed = weight_hist.iloc[-weight_context_len:]
+    plt.figure(figsize=(10, 6))
+    for ticker in tickers:
+        plt.plot(weight_hist_trimmed.index, weight_hist_trimmed[ticker], label=f"{ticker} Weight", linestyle='--', alpha=0.7)
+    plt.title('Equity Weights Over Time (Last Few Weeks)')
+    plt.xlabel('Date')
+    plt.ylabel('Equity Weights (0-1)')
+    plt.ylim(0, 1)
+    plt.legend(loc='upper right')
+    plt.grid(True)
+    plt.show()
+
 
 # Function to visualize the price history
 def plt_price(data, ticker):
@@ -92,7 +164,6 @@ def plt_garch_variance(returns, hist_var, predicted_variance, ticker):
     plt.grid(True)
     plt.show()
 
-    import matplotlib.pyplot as plt
 
 # Function to visualize the GARCH variance prediction
 def plt_garch_prediction(returns, model_fit, forecasted_variance, ticker):
@@ -152,10 +223,6 @@ def plt_arima_prediction(data, arima_prediction, ticker):
     plt.grid(True)
     plt.show()
 
-import matplotlib.pyplot as plt
-import numpy as np
-import numpy as np
-import matplotlib.pyplot as plt
 
 # Function to plot the Efficient Frontier and highlight key portfolios
 def plt_efficient_frontier(results, weights_record, expected_returns, cov_matrix, tickers):

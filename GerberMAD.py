@@ -1,3 +1,21 @@
+"""
+Portfolio optimization framework using modern financial modeling techniques. 
+Designed for equity portfolio management, focusing on risk-adjusted returns and diversification.
+
+1. Processing weekly stock price data.
+2. Calculating a denoised(eigenvalue clipping) Gerber covariance matrix based on Mean Absolute Deviation (MAD).
+3. (optional) Performing Nested Clustering Optimization (NCO) to group assets into clusters.
+4. Optimizing portfolio weights using Conditional Value-at-Risk (CVaR) with appropriate constraints.
+5. Simulating portfolio performance with periodic rebalancing.
+6. Visualizing portfolio value over time & comparing it to a benchmark (e.g., S&P 500).
+
+Top Priorities:
+- Deeper investigate denoising and risk hyperparameters.
+- Investigate confidence-bound timeseries prediction incorporation.
+- Implement semi-supervised equity management framework.
+
+"""
+
 
 import numpy as np
 import pandas as pd
@@ -7,16 +25,11 @@ import cvxpy as cp
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.linalg import eigh
 from sklearn.covariance import LedoitWolf
-
-# Download price data and calculate weekly returns
-def download_weekly_returns(tickers, start, end):
-    data = yf.download(tickers, start=start, end=end)['Adj Close']
-    weekly_data = data.resample('W').last()
-    returns = weekly_data.pct_change().dropna()
-    return returns
+from utils.download import download_returns
+from utils.visualization import visualize_portfolio
 
 # Denoising Covariance Matrix (Eigenvalue Clipping)
-def denoise_covariance(cov_matrix, clip_threshold=0.5):
+def denoise_covariance(cov_matrix, clip_threshold=0.05):
     eigenvals, eigenvecs = eigh(cov_matrix)
     
     # Apply the clipping threshold to denoise small eigenvalues
@@ -28,6 +41,17 @@ def denoise_covariance(cov_matrix, clip_threshold=0.5):
 
 # Gerber covariance matrix calculation (MAD)
 def gerber_covariance(returns, c=0.5):
+    '''
+    Gerber covariance matrix calculation based on Mean Absolute Deviation (MAD)
+    Arguments:
+    - returns: DataFrame of asset returns
+    - c: Threshold multiplier for MAD (default 0.5)
+    Returns:
+    - cov_matrix: Covariance matrix of the assets
+    '''
+
+    # Calculate the mean and standard deviation of returns
+    mean_returns = returns.mean()
     std_dev = returns.std()
     thresholds = c * std_dev
     n_assets = returns.shape[1]
@@ -53,42 +77,62 @@ def gerber_covariance(returns, c=0.5):
     return cov_matrix
 
 # Nested Clustering Optimization (NCO)
-def nested_clustering(cov_matrix, num_clusters=5):
+def nested_clustering(cov_matrix, num_clusters=3):
+    from scipy.spatial.distance import squareform
+    condensed_matrix = squareform(1 - cov_matrix)  # Convert to condensed distance matrix
+    linkage_matrix = linkage(condensed_matrix, method='ward')
     # Use hierarchical clustering to group assets
     linkage_matrix = linkage(cov_matrix, method='ward')
     clusters = fcluster(linkage_matrix, num_clusters, criterion='maxclust')
-    
     return clusters
 
+
 # CVaR Optimization with Nested Clustering Constraints
-def cvar_optimizer(returns, clusters, target_return, lambda_cvar=0.95, beta=0.05):
+def cvar_optimize(exp_returns, hist_returns, clusters, target_return, hyper_args=None):
     '''
-    Equity portolio management
+    Equity portolio optimizer
     Conditional Value-at-Risk constrained optimization
     Using denoised gerber mean-absolute-deviation covariance
+    Arguments:
+    - exp_returns: DataFrame of expected returns for each asset
+    - hist_returns: DataFrame of historical returns for each asset
+    - clusters: Array of cluster labels for each asset
+    - target_return: Target return for the portfolio
+    - hyper_args: Dictionary of hyperparameters for optimization (optional)
+        - lambda_cvar: CVaR confidence level (default 0.95)
+        - beta: CVaR tail-risk parameter (default 0.05% worst case: higher is more conservative)
+    Returns:
+    - weights: Optimized portfolio weights
     '''
-    n_assets = returns.shape[1]
+    n_assets = exp_returns.shape[1]
 
     # Calculate cluster-wise covariance matrices
-    cov_matrix = gerber_covariance(returns)
+    cov_matrix = gerber_covariance(hist_returns)
     cov_matrix_denoised = denoise_covariance(cov_matrix)
+
+    if hyper_args is not None:
+        beta = hyper_args.get('beta', 0.05)
+        lambda_cvar = hyper_args.get('lambda_cvar', 0.95)
+        risk_aversion = hyper_args.get('risk_aversion', 0.5)
 
     # Define variables
     weights = cp.Variable(n_assets)
     
     # Use CVXPY's @ operator for matrix multiplication
-    portfolio_return = returns.mean().values.flatten() @ weights
+    portfolio_return = exp_returns.mean().values.flatten() @ weights
 
     portfolio_risk = cp.quad_form(weights, cov_matrix_denoised)
 
     # CVaR constraints
     alpha = cp.Variable(1)  # VaR variable
-    z = cp.Variable(len(returns))  # Loss variables
-    losses = returns.values @ weights  # Use @ operator instead of *
+    z = cp.Variable(len(exp_returns))  # Loss variables
+    losses = -exp_returns.values @ weights  # Use @ operator instead of *
 
     constraints = [
         cp.sum(weights) == 1,
         weights >= 0,  # No short selling
+        # weights >= -0.1,  # No large short selling
+        # cp.sum(weights) >= -0.2,  # enforce mostly-long portfolio
         losses + alpha >= z,  # Loss constraints
         z >= 0
     ]
@@ -96,63 +140,80 @@ def cvar_optimizer(returns, clusters, target_return, lambda_cvar=0.95, beta=0.05
     # Add portfolio return constraint
     constraints.append(portfolio_return >= target_return)
     
-    # Enforce nested clustering constraints
-    for cluster in np.unique(clusters):
-        cluster_mask = (clusters == cluster).astype(float)
-        constraints.append(cp.sum(cp.multiply(weights, cluster_mask)) <= 0.5)  # Use multiply for element-wise multiplication
+    # Cap the sum of weights in each cluster to 0.5
+    if clusters is not None:
+        for cluster in np.unique(clusters):
+            cluster_mask = (clusters == cluster).astype(float)
+            constraints.append(cp.sum(cp.multiply(weights, cluster_mask)) <= 0.5)
     
     # CVaR constraint
-    cvar = alpha + (1 / (beta * len(returns))) * cp.sum(z)
-    objective = cp.Minimize(portfolio_risk + lambda_cvar * cvar)
+    cvar = alpha + (1 / (beta * len(exp_returns))) * cp.sum(z)
+    objective = cp.Minimize(risk_aversion*portfolio_risk + lambda_cvar * cvar)
+    # print(f"Objective: {portfolio_risk + lambda_cvar * cvar}: {portfolio_risk}, {lambda_cvar * cvar}")
     
     prob = cp.Problem(objective, constraints)
-    prob.solve()
+    prob.solve(solver=cp.GUROBI)
+    # print(f"alpha: {alpha.value}, z: {z.value}, portfolio_return: {portfolio_return.value}, portfolio_risk: {portfolio_risk.value}")
     
     return weights.value
 
-# Download price data and calculate weekly returns
-def download_weekly_returns(tickers, start, end):
-    data = yf.download(tickers, start=start, end=end)['Adj Close']
-    weekly_data = data.resample('W').last()
 
-    # Calculate percentage returns and drop NaN rows
-    returns = weekly_data.pct_change().dropna()
-
-    # If NaNs remain, forward fill the NaN values (optional)
-    returns = returns.ffill()  # Use the new method instead of 'method=' argument
-
-    return returns, weekly_data
-
-
-def simulate_portfolio(tickers, start, end, clusters, initial_value=100000, rebalance_interval=2):
+def simulate_portfolio(tickers, returns, prices, tgt_return, initial_value=1e6, rebalance_interval=2, rebalance_hist=10, hyper_args=None):
     '''
     Portfolio Optimization Simulation
-    Uses CVaR optimizer every n weeks
+    Uses CVaR optimizer every rebalance_interval days
+    Arguments:
+    - tickers: List of asset tickers
+    - returns: DataFrame of asset returns
+    - prices: DataFrame of asset prices
+    - tgt_return: Target return for the portfolio
+    - start: Start date for the simulation
+    - end: End date for the simulation
+    - initial_value: Initial portfolio value (default 1e6)
+    - rebalance_interval: Rebalance interval in days (default 5)
+    - hyper_args: Dictionary of hyperparameters for optimization (optional)
+        - lambda_cvar: CVaR confidence level (default 0.95)
+        - beta: CVaR tail-risk parameter (default 0.05% worst case: higher is more conservative)
+    Returns:
+    - portfolio_series: Series of portfolio values over time
+    - weight_history: List of weights over time
+    - timestamps: List of timestamps corresponding to portfolio values
+    - final_weights: Final optimized weights
     '''
-    
-    returns, prices = download_weekly_returns(tickers, start, end)
-    
+        
     # Initialize portfolio value
     portfolio_value = initial_value
     portfolio_values = []  # Track the portfolio value over time
+    weight_history = []  # Track the weights over time
     timestamps = []
     
-    # Initialize portfolio weights (will be updated every 2 weeks)
+    # Initialize portfolio weights (will be updated every rebalance_interval days)
     n_assets = len(tickers)
     weights = np.ones(n_assets) / n_assets  # Equal allocation to start
-    
+
     # Simulate over each period
-    for i in range(0, len(returns), rebalance_interval):
-        period_returns = returns.iloc[i:i + rebalance_interval]
-        print(period_returns.head())
-        print(weights)
+    rel_interval = int(rebalance_interval / (returns.index[1] - returns.index[0]).days)  # returns interval datapoints
+    rel_hist = int(rebalance_hist / (returns.index[1] - returns.index[0]).days)  # historic interval in returns datapoints
+    for i in range(rel_interval, len(returns), rel_interval):
+        hist_returns = returns.iloc[i - rel_hist:i]
+        period_returns = returns.iloc[i - rel_interval:i]
+
+
+        exp_returns = returns.iloc[i:i+rel_interval]
+        noise = np.random.normal(0, hist_returns.std().mean(), exp_returns.shape)  # Add Gaussian noise with mean 0 and std of historical returns
+        exp_returns = exp_returns + noise
+        
+        # Clean exp_returns to remove NaN or Inf values
+        exp_returns = exp_returns.replace([np.nan, np.inf, -np.inf], 0)
+
+        # print(period_returns.head())
         
         # Check if weights is not None before calculating portfolio return
         if weights is None:
             print("Warning: Weights are None. Falling back to equal allocation.")
-            weights = np.ones(n_assets) / n_assets  # Reset to equal allocation if weights are None
+            weights = np.ones(n_assets) / n_assets  # Reset to equal allocation
         
-        # Calculate portfolio return over this period
+        # Calculate portfolio return over prev period
         portfolio_return = np.dot(period_returns.mean().values, weights)
         portfolio_value = portfolio_value * (1 + portfolio_return)
         
@@ -161,51 +222,98 @@ def simulate_portfolio(tickers, start, end, clusters, initial_value=100000, reba
         timestamps.append(returns.index[i])
         
         # Re-optimize every interval [weeks]
-        if i + rebalance_interval < len(returns):
-            weights = cvar_optimizer(period_returns, clusters, target_return=0.005)
+        if i + rel_interval < len(returns):
+            clusters = None  # Placeholder for clusters, if needed
+            weights = cvar_optimize(exp_returns, hist_returns, clusters, target_return=tgt_return, hyper_args=hyper_args)
+            if weights is None:
+                print("Warning: Optimization failed. Adjusting target return.")
+                i = 1
+                adj_tgt = tgt_return
+                while weights is None:
+                    adj_tgt = adj_tgt - 0.1*tgt_return # Decrease target return
+                    weights = cvar_optimize(exp_returns, hist_returns, clusters, target_return=adj_tgt, hyper_args=hyper_args)
+                    i += 1
+                    if i > 25:
+                        print("Warning: Optimization failed multiple times. Setting equal weights.")
+                        weights = np.ones(n_assets) / n_assets  # Reset to equal allocation
+                print(f"Adjusted annualized return after {i} iterations: {adj_tgt*(rebalance_interval * 52):.3f}")
+            weights_r = np.round(weights, 4)
+            print(f"weights: {weights_r}")
+            weight_history.append(weights_r)
+
     
     portfolio_series = pd.Series(portfolio_values, index=timestamps)
+    # return portfolio_series, weight_history, final weights
+    return portfolio_series, weight_history, timestamps, weights_r
 
-    return portfolio_series
-
-def visualize_portfolio(tickers, start, end, clusters, initial_value):
-
-    # Plot the portfolio value over time
-    plt.figure(figsize=(10, 6))
-    portfolio_series.plot(label="Portfolio Value")
-    
-    # Optional: Download benchmark (S&P 500) for comparison
-    sp500 = yf.download('^GSPC', start=start, end=end)['Adj Close'].resample('W').last()
-    sp500_returns = sp500.pct_change().dropna()
-    
-    # Align the benchmark returns with the portfolio timestamps
-    sp500_returns.index = sp500_returns.index.tz_localize(None)
-    
-    sp500_value = initial_value * (1 + sp500_returns).cumprod()
-    print(sp500_value)
-    
-    sp500_value.plot(label="S&P 500")
-    
-    # Add labels and legend
-    plt.title('Portfolio Value Over Time with Rebalancing Every Two Weeks')
-    plt.xlabel('Date')
-    plt.ylabel('Portfolio Value')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
 
 
 if __name__ == "__main__":
-    tickers = ['IYW', 'SOXX', 'AAPL', 'MSFT', 'GOOGL', 'AVGO']
-    start = '2023-01-01'
-    end = '2024-06-01'
-    initial_value = 10000
-    interval_weeks = 1
+    tickers = [
+        'IYW', 'SOXX', 'AAPL', 'MSFT', 'GOOGL', 
+        'AVGO', 'NVDA', 'AMAT', 'INTC', 'TXN', 'QCOM', 
+        'TLT', 'SH']  # Treasury Bonds, S&P500 Hedge
+    start = '2024-01-01'
+    end = '2025-04-09'
+    initial_value = 1e4
+    rebalance_interval = 3 # days
+    rebalance_history = 20 # days
+    data_freq = 'D'  # Daily data frequency
+    tgt_return = 0.25 # Target return, annual
+    hyper_args = {
+        'risk_aversion': 0.95,
+        'beta': 0.05,
+        'lambda_cvar': 0.95
+    }
+
+    tgt_return = tgt_return / (rebalance_interval * 356) # Convert to rebalance period return
+
+    returns, prices = download_returns(tickers, start, end, frequency=data_freq)
+    if returns is None or prices is None:
+        print("Failed to download data. Exiting.")
+        exit(1)
+
+    # Cash backstop
+    if data_freq == 'H':
+        inflation_rate = 0.03 / (24*365)
+    elif data_freq == 'D':
+        inflation_rate = 0.03 / 365
+    elif data_freq == 'W':
+        inflation_rate = 0.03 / 52
+    elif data_freq == 'M':
+        inflation_rate = 0.03 / 12
+
+    cash_returns = pd.Series([-inflation_rate] * len(returns), index=returns.index)
+    tickers.append('CASH')
+    returns['CASH'] = cash_returns
+    prices['CASH'] = 1  # Cash price remains constant
+
+    # cov_matrix = gerber_covariance(returns)
+    # # clusters = nested_clustering(cov_matrix)
+    clusters = None
     
-    returns = download_weekly_returns(tickers, start, end)[0]
-    cov_matrix = gerber_covariance(returns)
-    clusters = nested_clustering(cov_matrix)
+    portfolio_series, weight_hist, timestamps, final_weight = simulate_portfolio(
+        tickers, returns, prices, tgt_return, initial_value, 
+        rebalance_interval, rebalance_history,
+        hyper_args=hyper_args
+    )
+
+    # Calculate the average weight history and print with tickers
+    if weight_hist:
+        avg_weights = np.mean(weight_hist, axis=0)
+        weight_summary = pd.DataFrame({'Ticker': tickers, 'Average Weight': avg_weights})
+        print(weight_summary)
+    else:
+        print("No weight history available.")
+
+    # Create a DataFrame for weight history with associated tickers
+    if weight_hist:
+        weight_hist_df = pd.DataFrame(weight_hist, columns=tickers, index=timestamps[:len(weight_hist)])
+    else:
+        print("No weight history available to create DataFrame.")
+
+    print(f"Final weights: {final_weight}")
+    print(f"Tickers: {tickers}")
     
-    portfolio_series = simulate_portfolio(tickers, start, end, clusters, initial_value, interval_weeks)
-    visualize_portfolio(tickers, start, end, clusters, initial_value)
+    visualize_portfolio(tickers, portfolio_series, weight_hist_df, start, end, clusters, initial_value, per=rebalance_interval)
 
