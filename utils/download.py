@@ -12,7 +12,9 @@ def download_returns(tickers, start, end, frequency='D'):
         (D, W, M, Y). Default is 'D'.
     Returns:
         returns (pd.DataFrame): DataFrame of returns.
-        prices (pd.DataFrame): DataFrame of adjusted close prices.
+        open_prices (pd.DataFrame): DataFrame of open prices.
+        high_prices (pd.DataFrame): DataFrame of high prices.
+        close_prices (pd.DataFrame): DataFrame of adjusted close prices.
     """
     all_prices = []
     for ticker in tickers:
@@ -29,7 +31,7 @@ def download_returns(tickers, start, end, frequency='D'):
                 )
                 # Then rename "Close" to your ticker
                 if not df_raw.empty:
-                    df = df_raw[['Close']].rename(columns={'Close': ticker})
+                    df = df_raw[['Open']].rename(columns={'Open': ticker})
                     all_prices.append(df)
                     break
             except Exception as e:

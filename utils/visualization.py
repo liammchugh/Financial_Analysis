@@ -5,7 +5,7 @@ import yfinance as yf
 import numpy as np
 from utils.download import download_returns
 
-def visualize_portfolio(tickers, series, weight_hist, start, end, clusters, initial_value, per=2, SP500ref=True):
+def visualize_portfolio(tickers, series, weight_hist, start, end, initial_value, per=2, SP500ref=True):
     """
         Visualize the portfolio value over time.
 
@@ -54,12 +54,15 @@ def visualize_portfolio(tickers, series, weight_hist, start, end, clusters, init
     plt.xlabel('Date')
     plt.ylabel('Portfolio Value')
     plt.grid(True)
-    plt.show()
+    plt.show(block=False)
 
-    # Plot weight history on the second figure
+
+def vis_weight_history(tickers, weight_hist, hist_days, per=2):
+    """
+    # Plot weight history throughout simulated optimization
+    """
     # Number of weeks to show in the weight history plot
-    hist_N = 30  # Number of days to show in the weight history plot
-    weight_context_len = int(hist_N  / per)  # Show the last N weeks of weights
+    weight_context_len = int(hist_days  / per)  # Show the last N weeks of weights
     weight_hist_trimmed = weight_hist.iloc[-weight_context_len:]
     plt.figure(figsize=(10, 6))
     for ticker in tickers:
@@ -70,7 +73,7 @@ def visualize_portfolio(tickers, series, weight_hist, start, end, clusters, init
     plt.ylim(0, 1)
     plt.legend(loc='upper right')
     plt.grid(True)
-    plt.show()
+    plt.show(block=False)
 
 
 # Function to visualize the price history

@@ -27,7 +27,6 @@ from scipy.linalg import eigh
 from sklearn.covariance import LedoitWolf
 from tqdm import tqdm
 from utils.download import download_returns
-from utils.visualization import visualize_portfolio
 
 # Denoising Covariance Matrix (Eigenvalue Clipping)
 def denoise_covariance(cov_matrix, clip_threshold=0.05):
@@ -150,7 +149,13 @@ def cvar_optimize(exp_returns, hist_returns, clusters, target_return, hyper_args
     
     # CVaR constraint
     cvar = alpha + (1 / (beta * len(exp_returns))) * cp.sum(z)
-    objective = cp.Minimize(risk_aversion*portfolio_risk + lambda_cvar * cvar)
+    return_avg = -cp.sum(losses)/len(exp_returns)  # Average return
+
+    objective = cp.Minimize(
+        (risk_aversion*portfolio_risk)
+          + (lambda_cvar * cvar)
+          - ((1-lambda_cvar)*return_avg)
+          )
     # print(f"Objective: {portfolio_risk + lambda_cvar * cvar}: {portfolio_risk}, {lambda_cvar * cvar}")
     
     prob = cp.Problem(objective, constraints)
@@ -159,6 +164,14 @@ def cvar_optimize(exp_returns, hist_returns, clusters, target_return, hyper_args
     
     return weights.value
 
+def simulate_expected_returns(returns, i, rel_interval):
+    noise = np.random.normal(0, returns.std().mean(), returns.shape)  # Gaussian noise with mean 0 and returns std
+    exp_returns = returns.iloc[i:i+rel_interval]
+    exp_returns = exp_returns + noise[i:i+rel_interval]  # Add noise to the expected returns
+    if exp_returns.isnull().values.any():
+        print("NaN values detected in expected returns.")
+    exp_returns = exp_returns.replace([np.nan, np.inf, -np.inf], 0)
+    return exp_returns
 
 def simulate_portfolio(tickers, returns, prices, tgt_return, initial_value=1e6, rebalance_interval=2, rebalance_hist=10, hyper_args=None):
     '''
@@ -196,19 +209,13 @@ def simulate_portfolio(tickers, returns, prices, tgt_return, initial_value=1e6, 
     # Simulate over each period
     rel_interval = int(rebalance_interval / (returns.index[1] - returns.index[0]).days)  # returns interval datapoints
     rel_hist = int(rebalance_hist / (returns.index[1] - returns.index[0]).days)  # historic interval in returns datapoints
-    noise = np.random.normal(0, returns.std().mean(), returns.shape)  # Gaussian noise with mean 0 and returns std
 
     for i in tqdm(range(rel_hist, len(returns), rel_interval), desc="Simulating Portfolio"):
         hist_returns = returns.iloc[i - rel_hist:i]
         period_returns = returns.iloc[i - rel_interval:i]
 
         # predicted returns, simulated with noisy next per returns
-        exp_returns = returns.iloc[i:i+rel_interval]
-        exp_returns = exp_returns + noise[i:i+rel_interval]  # Add noise to the expected returns
-        if exp_returns.isnull().values.any():
-            print("NaN values detected in expected returns.")
-        exp_returns = exp_returns.replace([np.nan, np.inf, -np.inf], 0)
-
+        exp_returns = simulate_expected_returns(returns, i, rel_interval)
 
         # print(period_returns.head())
         
@@ -256,23 +263,25 @@ if __name__ == "__main__":
         'IYW', 'SOXX', 'AAPL', 'MSFT', 'GOOGL', 
         'AVGO', 'NVDA', 'AMAT', 'INTC', 'TXN', 'QCOM', 
         'TLT', 'SH']  # Treasury Bonds, S&P500 Hedge
-    start = '2022-01-01'
+    start = '2023-01-01'
     end = '2025-04-09'
     initial_value = 1e4
-    rebalance_interval = 2 # days
+    rebalance_interval = 1 # days
     rebalance_history = 25 # days
     data_freq = 'D'  # Daily data frequency
     tgt_return = 0.20 # Target return, annual
     hyper_args = {
-        'tgt_return': tgt_return,
-        'risk_aversion': 0.9,
-        'beta': 0.15,
-        'lambda_cvar': 0.35
+        'ann_tgt_return': tgt_return,
+        'risk_aversion': 1.0,
+        'beta': 0.20,
+        'lambda_cvar': 0.95
     }
 
     tgt_return = tgt_return / 356 * rebalance_interval # Convert to rebalance period return
-
-    returns, prices = download_returns(tickers, start, end, frequency=data_freq)
+    start_date = pd.to_datetime(start)  # Convert start to datetime
+    hist_start = start_date - pd.Timedelta(days=rebalance_history)
+    returns, prices = download_returns(tickers, hist_start, end, frequency=data_freq)
+    print(len(returns), len(prices))
     if returns is None or prices is None:
         print("Failed to download data. Exiting.")
         exit(1)
@@ -302,6 +311,9 @@ if __name__ == "__main__":
         hyper_args=hyper_args
     )
 
+    # Clip out the first history interval from the portfolio return series
+    portfolio_series = portfolio_series.iloc[rebalance_history:]
+
     # Calculate the average weight history and print with tickers
     if weight_hist:
         avg_weights = np.mean(weight_hist, axis=0)
@@ -319,6 +331,10 @@ if __name__ == "__main__":
     rounded_final_weight = np.round(final_weight, 4)
     print(f"Final weights (rounded): {rounded_final_weight}")
     print(f"Tickers: {tickers}")
-    
-    visualize_portfolio(tickers, portfolio_series, weight_hist_df, start, end, clusters, initial_value, per=rebalance_interval)
+
+    from utils.visualization import visualize_portfolio, vis_weight_history
+
+    visualize_portfolio(tickers, portfolio_series, weight_hist_df, start, end, initial_value, per=rebalance_interval)
+    hist_days = 14
+    vis_weight_history(tickers, weight_hist_df, clusters, hist_days, per=rebalance_interval)
 
